@@ -2,6 +2,7 @@ package com.example.invitevip.admin;
 
 import com.example.invitevip.admin.dto.AdminRequest;
 import com.example.invitevip.admin.dto.AdminResponse;
+import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
@@ -25,7 +26,7 @@ public class AdminController {
     }
 
     @PostMapping
-    public ResponseEntity<?> saveAdmin(@RequestBody AdminRequest request) {
+    public ResponseEntity<?> saveAdmin(@Valid @RequestBody AdminRequest request) {
         try {
             AdminResponse savedAdmin = adminService.save(request);
             return ResponseEntity.ok(savedAdmin);
@@ -35,7 +36,7 @@ public class AdminController {
     }
 
     @PutMapping("/{id}")
-    public ResponseEntity<?> updateAdmin(@PathVariable Long id, @RequestBody AdminRequest request) {
+    public ResponseEntity<?> updateAdmin(@PathVariable Long id, @Valid @RequestBody AdminRequest request) {
         try {
             AdminResponse updatedAdmin = adminService.update(id, request);
             return ResponseEntity.ok(updatedAdmin);
