@@ -1,6 +1,7 @@
 package com.example.invitevip.customer;
 
 import com.example.invitevip.customer.entity.Customer;
+import com.example.invitevip.customer.entity.CustomerSearchEntity;
 import com.example.invitevip.customer.entity.InviteCode;
 import com.example.invitevip.customer.database.CustomerRepository;
 import com.example.invitevip.customer.database.CustomerSearchRepository;
@@ -12,7 +13,10 @@ import jakarta.transaction.Transactional;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 @Service
 public class CustomerService {
@@ -99,10 +103,24 @@ public class CustomerService {
 
     @Transactional
     public void syncAllToElasticsearch() {
-        List<Customer> list = customerRepository.findAll();
+        List<Customer> customers = customerRepository.findAll();
+        Set<Long> customerIds = customers.stream()
+                .map(Customer::getId)
+                .collect(Collectors.toSet());
 
-        for (Customer c : list) {
-            customerSearchRepository.save(customerSearchMapper.toSearchEntity(c));
+        List<CustomerSearchEntity> staleCustomers = new ArrayList<>();
+        for (CustomerSearchEntity document : customerSearchRepository.findAll()) {
+            if (!customerIds.contains(document.getId())) {
+                staleCustomers.add(document);
+            }
+        }
+
+        // 현재 고객 정보가 모두 반영된 뒤 불필요한 검색 데이터를 삭제합니다.
+        for (Customer customer : customers) {
+            customerSearchRepository.save(customerSearchMapper.toSearchEntity(customer));
+        }
+        if (!staleCustomers.isEmpty()) {
+            customerSearchRepository.deleteAll(staleCustomers);
         }
     }
 

@@ -46,7 +46,7 @@
 
 + 사용자는 초대코드를 입력해 고객 등급별 안내 페이지로 이동합니다.
 + 관리자는 Keycloak 로그인을 통해 인증을 진행하고 JWT를 포함해 백엔드 API를 호출합니다.
-+ 백엔드는 Spring Security로 JWT와 권한을 검증한 뒤 고객 관리, 초대코드 검증, 관리자 권한 관리 로직을 처리합니다.
++ 초대코드 확인은 로그인 없이 사용할 수 있습니다. 고객 관리와 관리자 권한 관리 API는 Spring Security로 JWT와 권한을 검증합니다.
 + 고객 / 관리자 / 권한 데이터는 MySQL에 저장하고 고객 검색 데이터는 Elasticsearch에 저장해 검색 기능에 활용합니다.
 + Keycloak Admin Client를 사용해 서비스 관리자 정보와 Keycloak 로그인 계정을 함께 관리합니다.
 
@@ -77,6 +77,7 @@
 + 초대코드는 InviteCode 값 객체를 통해 숫자 4자리인지 검증합니다.
 + 유효한 코드라면 고객 정보를 반환합니다.
 + 그리고 프론트엔드에서 고객 등급에 따라 VIP, VVIP, DIAMOND 페이지로 이동합니다.
++ 현재 등급별 안내 페이지는 주소를 직접 입력해도 접근할 수 있으며, 페이지 자체의 접근 제한은 구현하지 않았습니다.
 
 ```java
 public Optional<CustomerResponse> findByCode(String code) {
@@ -194,8 +195,8 @@ if (c >= '가' && c <= '힣') {
 {
   "bool": {
     "should": [
-      { "match": { "name": "?0" } },
-      { "match": { "note": "?0" } },
+      { "match": { "name": { "query": "?0" } } },
+      { "match": { "note": { "query": "?0" } } },
       { "wildcard": { "grade": { "value": "*?0*" } } },
       { "wildcard": { "phone": { "value": "*?0*" } } },
       { "wildcard": { "code": { "value": "*?0*" } } },
@@ -326,7 +327,9 @@ admin.getAdminPermissions().add(adminPermission);
 
 3) 문제 해결 <br/>
 + 고객 등록 / 수정 / 삭제 시 Elasticsearch 인덱스도 함께 저장하거나 삭제하도록 처리했습니다.
-+ MySQL 기준 고객 데이터를 Elasticsearch에 다시 반영할 수 있는 수동 동기화 API도 추가했습니다.
++ MySQL 기준으로 검색 데이터를 다시 맞추는 수동 동기화 API도 추가했습니다.
++ 현재 고객 정보를 모두 저장한 뒤, MySQL에는 없고 Elasticsearch에만 남은 고객 데이터를 삭제합니다.
++ 현재 고객 정보를 저장하는 도중 오류가 발생하면 남은 검색 데이터를 삭제하는 단계는 진행하지 않습니다.
   
 ```java
 Customer saved = customerRepository.save(customer);
@@ -358,6 +361,33 @@ customerSearchRepository.deleteById(id);
 public ResponseEntity<String> sync() {
     customerService.syncAllToElasticsearch();
     return ResponseEntity.ok("sync ok");
+}
+```
+
+아래는 수동 동기화 처리 코드입니다.
+
+```java
+@Transactional
+public void syncAllToElasticsearch() {
+    List<Customer> customers = customerRepository.findAll();
+    Set<Long> customerIds = customers.stream()
+            .map(Customer::getId)
+            .collect(Collectors.toSet());
+
+    List<CustomerSearchEntity> staleCustomers = new ArrayList<>();
+    for (CustomerSearchEntity document : customerSearchRepository.findAll()) {
+        if (!customerIds.contains(document.getId())) {
+            staleCustomers.add(document);
+        }
+    }
+
+    // 현재 고객 정보가 모두 반영된 뒤 불필요한 검색 데이터를 삭제합니다.
+    for (Customer customer : customers) {
+        customerSearchRepository.save(customerSearchMapper.toSearchEntity(customer));
+    }
+    if (!staleCustomers.isEmpty()) {
+        customerSearchRepository.deleteAll(staleCustomers);
+    }
 }
 ```
 
@@ -417,20 +447,23 @@ if (admin.getKeycloakId() == null || admin.getKeycloakId().isBlank()) {
 1) 현재 처리 방식 <br/>
 + 고객 원본 데이터는 MySQL에 저장하고, 검색에 사용할 데이터는 Elasticsearch 인덱스에도 함께 저장했습니다.
 + 고객 등록, 수정, 삭제 시점에 Elasticsearch를 바로 호출해 검색 결과가 최신 상태에 가깝게 유지되도록 처리했습니다.
-+ 또한 검색 인덱스가 MySQL 데이터와 어긋났을 때를 대비해, MySQL 기준 고객 데이터를 Elasticsearch에 다시 저장하는 수동 동기화 API를 두었습니다.
++ 수동 동기화 API는 MySQL의 현재 고객 정보를 검색 엔진에 다시 저장하고, MySQL에 없는 검색 데이터를 삭제합니다.
 
 
 <br/><br/>
 
 2) 아쉬운 점 <br/>
 + MySQL과 Elasticsearch는 서로 다른 저장소이기 때문에 하나의 트랜잭션으로 완전히 묶이지는 않습니다.
-+ 따라서 실제 운영 환경에서는 MySQL 반영은 성공했지만 Elasticsearch 반영이 실패하는 상황을 더 세밀하게 추적하고 복구할 필요가 있습니다.
++ 한쪽 작업이 성공한 뒤 다른 쪽 작업이나 DB 커밋이 실패하면 두 저장소의 데이터가 어긋날 수 있습니다.
++ 현재 수동 동기화는 고객 수가 적고, 동기화 중 다른 고객 변경 작업이 없는 상황을 전제로 합니다.
++ 동기화 도중의 동시 변경과 일부 반영 실패에 대한 자동 복구는 추가로 보완할 부분입니다.
 
 <br/><br/>
 
 3) 개선 방향 <br/>
 + 실제 서비스라면 고객 데이터 변경 시 Elasticsearch를 바로 호출하기보다 변경 이벤트를 별도로 저장하는 방식을 고려할 수 있습니다.
-+ 예를 들어 Outbox Pattern이나 메시지 큐를 사용하면 DB 변경 이력을 안전하게 남기고 Elasticsearch 반영 실패 시 재시도하거나 실패 상태를 추적할 수 있습니다.
++ 예를 들어 변경 이력을 DB에 별도로 저장하는 Outbox Pattern이나 메시지 큐를 이용해 검색 데이터 반영 실패를 추적하고 재시도하는 구조를 고려할 수 있습니다.
++ Outbox Pattern과 메시지 큐는 향후 개선 방안이며, 현재 프로젝트에는 적용하지 않았습니다.
 + 현재 프로젝트에서는 개인 프로젝트 규모를 고려해 CRUD 시점에 즉시 반영하고, 필요 시 수동 동기화 API로 복구할 수 있는 단순한 구조를 선택했습니다.
 
 <br/><br/>
@@ -464,9 +497,12 @@ if (admin.getKeycloakId() == null || admin.getKeycloakId().isBlank()) {
 
 ### [ 운영 환경을 고려한 설정 및 테스트 보강 ] <br/>
 
-1) 현재 처리방식 <br/>
+1) 현재 처리 방식 <br/>
 + 개발 과정에서는 로컬 환경에서 MySQL, Elasticsearch, Keycloak을 실행하며 기능 구현과 흐름 확인에 집중했습니다.
 + 인증, 권한, 고객 검색, 관리자 관리 기능이 연결되는 전체 흐름을 우선적으로 구현했습니다.
++ 수동 동기화 보완 후, 저장소 동작을 대신하는 Mock을 사용한 단위 테스트 6개를 추가했고 모두 통과했습니다.
++ 현재 고객 갱신·추가, 검색에만 남은 고객 삭제, 빈 데이터 처리, 조회·저장 실패 시의 동작을 확인했습니다.
++ 실제 MySQL과 Elasticsearch를 연결한 통합 검증은 아직 진행하지 않았으며, 기존 앱 구동 테스트는 DB 연결 설정 부족으로 실행에 실패했습니다.
 
 <br/><br/>
 
@@ -484,4 +520,8 @@ if (admin.getKeycloakId() == null || admin.getKeycloakId().isBlank()) {
 
 <br/><br/>
 
+### 🔶 실행 방법
 
++ Java 17 환경에서 MySQL, Elasticsearch, Keycloak을 준비합니다. Elasticsearch에는 한글 검색에 사용하는 Nori 분석기가 필요합니다.
++ 각 서비스의 접속 정보와 Keycloak 연동 설정을 맞춘 뒤 `./gradlew bootRun`을 실행합니다.
++ 화면을 확인하려면 프론트엔드도 함께 실행해야 합니다.
