@@ -24,7 +24,7 @@
 ### 🔶 프로젝트 관련 링크
 
 + [Blog (프로젝트 기록)](https://post-this.tistory.com/category/%F0%9F%92%BB%20%ED%94%84%EB%A1%9C%EC%A0%9D%ED%8A%B8/%F0%9F%90%A0%ED%9A%8C%EC%9B%90%EA%B0%80%EC%9E%85%20%ED%8E%98%EC%9D%B4%EC%A7%80%F0%9F%90%A0)
-+ YouTube (동작화면)
++ [YouTube (동작화면)](https://youtu.be/g4nXTk9zHbc)
 + [Figma (다이어그램)](https://www.figma.com/board/ymjJijKbxc8MZPF4UT8Ysn/Invite-and-Management?node-id=0-1&t=RE8pZSuCVea9F2X6-1)
 
 
