@@ -77,7 +77,6 @@
 + 초대코드는 InviteCode 값 객체를 통해 숫자 4자리인지 검증합니다.
 + 유효한 코드라면 고객 정보를 반환합니다.
 + 그리고 프론트엔드에서 고객 등급에 따라 VIP, VVIP, DIAMOND 페이지로 이동합니다.
-+ 현재 등급별 안내 페이지는 주소를 직접 입력해도 접근할 수 있으며, 페이지 자체의 접근 제한은 구현하지 않았습니다.
 
 ```java
 public Optional<CustomerResponse> findByCode(String code) {
@@ -166,7 +165,6 @@ customerSearchRepository.deleteById(id);
 + name, note는 한글 검색을 고려해 analyzer를 적용했습니다.
 + 고객 이름에서 초성을 추출해 nameChosung 필드에 저장했습니다.
 + 예를 들어 홍길동은 ㅎㄱㄷ으로 저장되어 초성 검색이 가능합니다.
-+ 아래 코드는 검색 조건 중 핵심 부분을 발췌한 예시입니다.
 
 ```java
 public CustomerSearchEntity toSearchEntity(Customer customer) {
@@ -396,7 +394,7 @@ public void syncAllToElasticsearch() {
 ### [ MySQL과 Keycloak 관리자 계정 불일치 문제 ] <br/>
 
 1) 문제 발생 <br/>
-+ 관리자 정보는 MySQL에 저장하고, 실제 로그인 계정은 Keycloak에 생성했습니다.
++ 관리자 정보는 MySQL에 저장하고 실제 로그인 계정은 Keycloak에 생성했습니다.
 + 둘 중 하나만 반영되면 DB에는 있지만 로그인할 수 없거나, 로그인은 되지만 서비스 권한을 조회할 수 없는 문제가 생길 수 있었습니다.
 
 <br/><br/>
@@ -447,7 +445,7 @@ if (admin.getKeycloakId() == null || admin.getKeycloakId().isBlank()) {
 1) 현재 처리 방식 <br/>
 + 고객 원본 데이터는 MySQL에 저장하고, 검색에 사용할 데이터는 Elasticsearch 인덱스에도 함께 저장했습니다.
 + 고객 등록, 수정, 삭제 시점에 Elasticsearch를 바로 호출해 검색 결과가 최신 상태에 가깝게 유지되도록 처리했습니다.
-+ 수동 동기화 API는 MySQL의 현재 고객 정보를 검색 엔진에 다시 저장하고, MySQL에 없는 검색 데이터를 삭제합니다.
++ 수동 동기화 API는 MySQL의 현재 고객 정보를 검색 엔진에 다시 저장하고 MySQL에 없는 검색 데이터를 삭제합니다.
 
 
 <br/><br/>
@@ -455,7 +453,7 @@ if (admin.getKeycloakId() == null || admin.getKeycloakId().isBlank()) {
 2) 아쉬운 점 <br/>
 + MySQL과 Elasticsearch는 서로 다른 저장소이기 때문에 하나의 트랜잭션으로 완전히 묶이지는 않습니다.
 + 한쪽 작업이 성공한 뒤 다른 쪽 작업이나 DB 커밋이 실패하면 두 저장소의 데이터가 어긋날 수 있습니다.
-+ 현재 수동 동기화는 고객 수가 적고, 동기화 중 다른 고객 변경 작업이 없는 상황을 전제로 합니다.
++ 현재 수동 동기화는 고객 수가 적고 동기화 중 다른 고객 변경 작업이 없는 상황을 전제로 합니다.
 + 동기화 도중의 동시 변경과 일부 반영 실패에 대한 자동 복구는 추가로 보완할 부분입니다.
 
 <br/><br/>
@@ -464,7 +462,7 @@ if (admin.getKeycloakId() == null || admin.getKeycloakId().isBlank()) {
 + 실제 서비스라면 고객 데이터 변경 시 Elasticsearch를 바로 호출하기보다 변경 이벤트를 별도로 저장하는 방식을 고려할 수 있습니다.
 + 예를 들어 변경 이력을 DB에 별도로 저장하는 Outbox Pattern이나 메시지 큐를 이용해 검색 데이터 반영 실패를 추적하고 재시도하는 구조를 고려할 수 있습니다.
 + Outbox Pattern과 메시지 큐는 향후 개선 방안이며, 현재 프로젝트에는 적용하지 않았습니다.
-+ 현재 프로젝트에서는 개인 프로젝트 규모를 고려해 CRUD 시점에 즉시 반영하고, 필요 시 수동 동기화 API로 복구할 수 있는 단순한 구조를 선택했습니다.
++ 현재 프로젝트에서는 개인 프로젝트 규모를 고려해 CRUD 시점에 즉시 반영하고 필요 시 수동 동기화 API로 복구할 수 있는 단순한 구조를 선택했습니다.
 
 <br/><br/>
 
@@ -487,7 +485,7 @@ if (admin.getKeycloakId() == null || admin.getKeycloakId().isBlank()) {
 
 3) 개선 방향 <br/>
 + 실제 서비스라면 관리자 생성, 수정, 삭제 요청을 상태값으로 관리하는 방식을 고려할 수 있습니다.
-+ 예를 들어 관리자 생성 요청을 먼저 DB에 저장하고, Keycloak 연동 작업은 별도 작업 큐에서 처리한 뒤 성공 시 ACTIVE, 실패 시 FAILED 상태로 관리할 수 있습니다.
++ 예를 들어 관리자 생성 요청을 먼저 DB에 저장하고 Keycloak 연동 작업은 별도 작업 큐에서 처리한 뒤 성공 시 ACTIVE, 실패 시 FAILED 상태로 관리할 수 있습니다.
 + 이렇게 하면 Keycloak 장애나 중간 실패 상황을 추적하고 재시도하기 쉬워집니다.
 + 현재 프로젝트에서는 구조가 지나치게 무거워지지 않도록 flush()와 keycloakId를 활용해 두 시스템의 연결 순서를 명확히 하는 방식으로 처리했습니다.
 
@@ -502,7 +500,6 @@ if (admin.getKeycloakId() == null || admin.getKeycloakId().isBlank()) {
 + 인증, 권한, 고객 검색, 관리자 관리 기능이 연결되는 전체 흐름을 우선적으로 구현했습니다.
 + 수동 동기화 보완 후, 저장소 동작을 대신하는 Mock을 사용한 단위 테스트 6개를 추가했고 모두 통과했습니다.
 + 현재 고객 갱신·추가, 검색에만 남은 고객 삭제, 빈 데이터 처리, 조회·저장 실패 시의 동작을 확인했습니다.
-+ 실제 MySQL과 Elasticsearch를 연결한 통합 검증은 아직 진행하지 않았으며, 기존 앱 구동 테스트는 DB 연결 설정 부족으로 실행에 실패했습니다.
 
 <br/><br/>
 
