@@ -39,3 +39,28 @@ out/
 ### macOS ###
 .DS_Store
 Icon?
+
+### Account migration helpers ###
+ops/__pycache__/
+
+### Local service credentials and certificates ###
+/src/main/resources/application.properties
+/src/main/resources/http_ca.crt
+
+### Files excluded from publication ###
+[Rr][Ee][Aa][Dd][Mm][Ee]*
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.crt
+*.log
+*.sql.gz
+*.dump
+*.bak
+admin-link-before-*.json
+/backups/

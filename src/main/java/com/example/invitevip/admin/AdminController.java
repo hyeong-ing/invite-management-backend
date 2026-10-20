@@ -15,8 +15,10 @@ import java.util.List;
 public class AdminController {
 
     private final AdminService adminService;
+    private final com.example.invitevip.admin.sync.AccountSyncService accountSync;
 
-    public AdminController(AdminService adminService) {
+    public AdminController(AdminService adminService, com.example.invitevip.admin.sync.AccountSyncService accountSync) {
+        this.accountSync = accountSync;
         this.adminService = adminService;
     }
 
@@ -29,7 +31,7 @@ public class AdminController {
     public ResponseEntity<?> saveAdmin(@Valid @RequestBody AdminRequest request) {
         try {
             AdminResponse savedAdmin = adminService.save(request);
-            return ResponseEntity.ok(savedAdmin);
+            return ResponseEntity.accepted().body(savedAdmin);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(e.getMessage());
         }
@@ -48,7 +50,30 @@ public class AdminController {
     @DeleteMapping("/{id}")
     public ResponseEntity<String> deleteAdmin(@PathVariable Long id) {
         adminService.delete(id);
-        return ResponseEntity.ok("관리자가 삭제되었습니다.");
+        return ResponseEntity.accepted().body("서비스 접근을 차단했습니다. Keycloak 계정 삭제를 처리합니다.");
+    }
+
+    @PostMapping("/{id}/sync/retry")
+    public ResponseEntity<?> retry(@PathVariable Long id) {
+        try {
+            accountSync.retry(id);
+            return ResponseEntity.accepted().body("계정 동기화를 다시 요청했습니다.");
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        }
+    }
+
+    public record LinkRequest(
+            @jakarta.validation.constraints.NotBlank
+            @jakarta.validation.constraints.Size(max = 100) String keycloakId) {}
+
+    @PostMapping("/{id}/link")
+    public ResponseEntity<?> link(@PathVariable Long id, @Valid @RequestBody LinkRequest request) {
+        try {
+            return ResponseEntity.ok(adminService.link(id, request.keycloakId().trim()));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        }
     }
 
     @GetMapping("/search")

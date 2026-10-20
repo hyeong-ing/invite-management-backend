@@ -3,6 +3,7 @@ package com.example.invitevip.common;
 import com.example.invitevip.admin.AdminNotFoundException;
 import com.example.invitevip.customer.CustomerNotFoundException;
 import com.example.invitevip.customer.DuplicateCodeException;
+import com.example.invitevip.customer.sync.SearchSyncUnavailableException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -14,6 +15,20 @@ import java.util.stream.Collectors;
 
 @RestControllerAdvice
 public class ApiExceptionHandler {
+    @ExceptionHandler({jakarta.ws.rs.WebApplicationException.class, jakarta.ws.rs.ProcessingException.class})
+    public ResponseEntity<String> handleAccountProviderUnavailable(RuntimeException e) {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body("Keycloak 연결 또는 설정을 확인하고 다시 시도하세요.");
+    }
+
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<String> handleInvalidRequest(IllegalArgumentException e) {
+        return ResponseEntity.badRequest().body(e.getMessage());
+    }
+
+    @ExceptionHandler(SearchSyncUnavailableException.class)
+    public ResponseEntity<String> handleSearchSyncUnavailable(SearchSyncUnavailableException e) {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(e.getMessage());
+    }
 
     @ExceptionHandler(DuplicateCodeException.class)
     public ResponseEntity<String> handleDuplicateCode(DuplicateCodeException e) {

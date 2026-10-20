@@ -1,118 +1,121 @@
 package com.example.invitevip.customer;
 
 import com.example.invitevip.customer.database.CustomerRepository;
-import com.example.invitevip.customer.database.CustomerSearchRepository;
 import com.example.invitevip.customer.entity.Customer;
 import com.example.invitevip.customer.entity.CustomerSearchEntity;
 import com.example.invitevip.customer.mapper.CustomerSearchMapper;
+import com.example.invitevip.customer.sync.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.SimpleTransactionStatus;
 
+import java.time.Clock;
 import java.util.List;
+import java.util.Optional;
 
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.ArgumentMatchers.any;
+import static org.assertj.core.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
+/** Preserve the original full-sync guarantees through the new snapshot rebuild. */
 @ExtendWith(MockitoExtension.class)
 class CustomerSyncTest {
     @Mock CustomerRepository customers;
-    @Mock CustomerSearchRepository search;
     @Mock CustomerSearchMapper mapper;
-    @InjectMocks CustomerService service;
+    @Mock SearchOutboxRepository outbox;
+    @Mock SearchSyncLockRepository locks;
+    @Mock PlatformTransactionManager transactions;
+    SearchSyncTestSupport.FakeIndex index;
+    SearchSyncService service;
+
+    @BeforeEach
+    void setUp() {
+        index = spy(new SearchSyncTestSupport.FakeIndex());
+        when(locks.lock(anyLong())).thenReturn(Optional.of(mock(SearchSyncLock.class)));
+        when(transactions.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
+        service = new SearchSyncService(outbox, locks, customers, mapper, new ObjectMapper(),
+                index, Clock.systemUTC(), transactions, 3, 50);
+    }
 
     @Test
-    void updatesExistingAndAddsMissingCustomersWithoutDeletingValidDocuments() {
-        Customer first = customer(1L);
-        Customer second = customer(2L);
-        CustomerSearchEntity updated = document(1L);
-        CustomerSearchEntity added = document(2L);
+    void updatesExistingAndAddsMissingCustomersWithoutLosingValidDocuments() throws Exception {
+        Customer first = mock(Customer.class);
+        Customer second = mock(Customer.class);
+        var updated = document(1L, "Updated customer");
+        var added = document(2L, "New customer");
+        index.write(document(1L, "Previous name"), 0);
         when(customers.findAll()).thenReturn(List.of(first, second));
-        when(search.findAll()).thenReturn(List.of(document(1L)));
         when(mapper.toSearchEntity(first)).thenReturn(updated);
         when(mapper.toSearchEntity(second)).thenReturn(added);
 
-        service.syncAllToElasticsearch();
-
-        verify(search).save(updated);
-        verify(search).save(added);
-        verify(search, never()).deleteAll(any(Iterable.class));
+        assertThat(service.rebuild().customers()).isEqualTo(2);
+        assertThat(index.scan()).containsOnlyKeys(1L, 2L);
+        assertThat(index.get(1L).getName()).isEqualTo("Updated customer");
+        assertThat(index.get(2L).getName()).isEqualTo("New customer");
     }
 
     @Test
-    void deletesOnlyOrphanDocumentsAfterSavingCurrentCustomers() {
-        Customer current = customer(1L);
-        CustomerSearchEntity updated = document(1L);
-        CustomerSearchEntity orphan = document(2L);
+    void removesOrphansWhenPublishingCurrentCustomers() throws Exception {
+        Customer current = mock(Customer.class);
+        index.write(document(1L, "Previous name"), 0);
+        index.write(document(2L, "Orphan"), 0);
         when(customers.findAll()).thenReturn(List.of(current));
-        when(search.findAll()).thenReturn(List.of(document(1L), orphan));
-        when(mapper.toSearchEntity(current)).thenReturn(updated);
+        when(mapper.toSearchEntity(current)).thenReturn(document(1L, "Current customer"));
 
-        service.syncAllToElasticsearch();
+        service.rebuild();
 
-        var order = inOrder(search);
-        order.verify(search).save(updated);
-        order.verify(search).deleteAll(List.of(orphan));
+        assertThat(index.scan()).containsOnlyKeys(1L);
+        assertThat(index.get(1L).getName()).isEqualTo("Current customer");
     }
 
     @Test
-    void deletesRemainingSearchDocumentsWhenDatabaseIsEmpty() {
-        CustomerSearchEntity orphan = document(2L);
+    void removesRemainingSearchDocumentsWhenDatabaseIsEmpty() throws Exception {
+        index.write(document(2L, "Orphan"), 0);
         when(customers.findAll()).thenReturn(List.of());
-        when(search.findAll()).thenReturn(List.of(orphan));
 
-        service.syncAllToElasticsearch();
-
-        verify(search).deleteAll(List.of(orphan));
-        verify(search, never()).save(any(CustomerSearchEntity.class));
+        assertThat(service.rebuild().customers()).isZero();
+        assertThat(index.scan()).isEmpty();
     }
 
     @Test
-    void doesNothingWhenBothStoresAreEmpty() {
+    void publishesEmptySnapshotWhenBothStoresAreEmpty() {
         when(customers.findAll()).thenReturn(List.of());
-        when(search.findAll()).thenReturn(List.of());
 
-        service.syncAllToElasticsearch();
-
-        verify(search, never()).save(any(CustomerSearchEntity.class));
-        verify(search, never()).deleteAll(any(Iterable.class));
+        assertThat(service.rebuild().customers()).isZero();
+        assertThat(index.scan()).isEmpty();
     }
 
     @Test
-    void doesNotDeleteOrphansWhenSavingFails() {
-        Customer current = customer(1L);
-        CustomerSearchEntity updated = document(1L);
+    void keepsExistingDocumentsWhenPublishingFails() throws Exception {
+        Customer current = mock(Customer.class);
+        index.write(document(1L, "Previous name"), 0);
+        index.write(document(2L, "Orphan"), 0);
         when(customers.findAll()).thenReturn(List.of(current));
-        when(search.findAll()).thenReturn(List.of(document(2L)));
-        when(mapper.toSearchEntity(current)).thenReturn(updated);
-        when(search.save(updated)).thenThrow(new IllegalStateException("Search unavailable"));
+        when(mapper.toSearchEntity(current)).thenReturn(document(1L, "Current customer"));
+        doThrow(new IllegalStateException("Search unavailable")).when(index).rebuild(anyList(), anyLong());
 
-        assertThrows(IllegalStateException.class, service::syncAllToElasticsearch);
-
-        verify(search, never()).deleteAll(any(Iterable.class));
+        assertThatThrownBy(service::rebuild).isInstanceOf(SearchSyncUnavailableException.class);
+        assertThat(index.scan()).containsOnlyKeys(1L, 2L);
+        assertThat(index.get(1L).getName()).isEqualTo("Previous name");
     }
 
     @Test
     void doesNotTouchSearchWhenDatabaseReadFails() {
         when(customers.findAll()).thenThrow(new IllegalStateException("Database unavailable"));
 
-        assertThrows(IllegalStateException.class, service::syncAllToElasticsearch);
-
-        verifyNoInteractions(search);
+        assertThatThrownBy(service::rebuild).isInstanceOf(IllegalStateException.class);
+        verifyNoInteractions(index);
     }
 
-    private Customer customer(Long id) {
-        Customer customer = mock(Customer.class);
-        when(customer.getId()).thenReturn(id);
-        return customer;
-    }
-
-    private CustomerSearchEntity document(Long id) {
-        CustomerSearchEntity document = new CustomerSearchEntity();
+    private CustomerSearchEntity document(Long id, String name) {
+        var document = new CustomerSearchEntity();
         document.setId(id);
+        document.setName(name);
         return document;
     }
 }

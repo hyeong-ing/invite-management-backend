@@ -17,8 +17,17 @@ public class Admin {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(name = "keycloak_id", length = 100)
+    @Column(name = "keycloak_id", length = 100, unique = true)
     private String keycloakId;
+
+    public enum State { UNLINKED, PENDING_CREATE, ACTIVE, BLOCKED, DELETING, DELETED }
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 30)
+    private State state = State.UNLINKED;
+
+    @Column(nullable = false, unique = true, length = 36)
+    private String accountRef = java.util.UUID.randomUUID().toString();
 
     @Column(nullable = false, length = 50, unique = true)
     private String username;

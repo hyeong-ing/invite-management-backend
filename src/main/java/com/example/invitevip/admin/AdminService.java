@@ -12,17 +12,13 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import org.keycloak.admin.client.Keycloak;
-import org.keycloak.representations.idm.CredentialRepresentation;
-import org.keycloak.representations.idm.UserRepresentation;
-import jakarta.ws.rs.core.Response;
+import com.example.invitevip.admin.sync.AccountSyncService;
+import com.example.invitevip.admin.sync.AccountOutboxRepository;
 
-import java.net.URI;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -36,8 +32,9 @@ public class AdminService {
     private final AdminRepository adminRepository;
     private final PermissionRepository permissionRepository;
 
-    private final Keycloak keycloakAdminClient;
-    private final String REALM_NAME = "invitevip";
+    private final AccountSyncService accountSync;
+    private final AccountOutboxRepository accountOutbox;
+    private final com.example.invitevip.admin.sync.AccountGateway accountGateway;
 
     public List<AdminResponse> findAllAdmins() {
         return adminRepository.findAll().stream()
@@ -47,6 +44,8 @@ public class AdminService {
 
     @Transactional
     public AdminResponse save(AdminRequest request) {
+        accountSync.lock();
+        rejectPassword(request);
         validateDuplicateUsername(null, request.getUsername());
 
         Admin admin = new Admin();
@@ -56,23 +55,30 @@ public class AdminService {
 
         replacePermissions(admin, request.getPermissions());
 
-        Admin savedAdmin = adminRepository.saveAndFlush(admin);
-
-        String keycloakId = createKeycloakUser(request);
-        savedAdmin.setKeycloakId(keycloakId);
-        adminRepository.flush();
+        admin.setState(Admin.State.PENDING_CREATE);
+        Admin savedAdmin = adminRepository.save(admin);
+        accountSync.enqueue(savedAdmin);
 
         return toResponse(savedAdmin);
     }
 
     @Transactional
     public AdminResponse update(Long id, AdminRequest request) {
+        accountSync.lock();
+        rejectPassword(request);
         Admin admin = adminRepository.findById(id)
                 .orElseThrow(() -> new AdminNotFoundException(id));
 
-        validateDuplicateUsername(id, request.getUsername());
-
-        String oldUsername = admin.getUsername();
+        if (admin.getState() != Admin.State.ACTIVE && admin.getState() != Admin.State.PENDING_CREATE) {
+            throw new IllegalArgumentException("활성 또는 생성 대기 계정만 수정할 수 있습니다.");
+        }
+        if (!admin.getUsername().equals(request.getUsername())) {
+            throw new IllegalArgumentException("계정 연결 보호를 위해 아이디는 변경할 수 없습니다.");
+        }
+        if (admin.getRole() == AdminRole.SUPER_ADMIN && !"SUPER_ADMIN".equals(request.getRole())) {
+            protectLastSuperAdmin(admin);
+        }
+        boolean profileChanged = !Objects.equals(admin.getName(), request.getName());
 
         admin.setName(request.getName());
         admin.setUsername(request.getUsername());
@@ -80,23 +86,53 @@ public class AdminService {
 
         replacePermissions(admin, request.getPermissions());
 
-        adminRepository.flush();
-        updateKeycloakUser(admin, oldUsername, request);
+        if (profileChanged) accountSync.enqueue(admin);
 
         return toResponse(admin);
     }
 
     @Transactional
     public void delete(Long id) {
-        Admin admin = adminRepository.findById(id)
-                .orElseThrow(() -> new AdminNotFoundException(id));
+        accountSync.lock();
+        Admin admin = adminRepository.findById(id).orElseThrow(() -> new AdminNotFoundException(id));
+        if (admin.getState() == Admin.State.DELETED || admin.getState() == Admin.State.DELETING) return;
+        if (admin.getState() == Admin.State.UNLINKED) {
+            throw new IllegalArgumentException("기존 계정 연결을 검증한 후 삭제할 수 있습니다.");
+        }
+        protectLastSuperAdmin(admin);
+        admin.setState(Admin.State.DELETING);
+        accountSync.enqueue(admin);
+    }
 
-        String keycloakId = getKeycloakId(admin, admin.getUsername());
+    private void protectLastSuperAdmin(Admin admin) {
+        if (admin.getState() == Admin.State.ACTIVE && admin.getRole() == AdminRole.SUPER_ADMIN
+                && adminRepository.countByStateAndRole(Admin.State.ACTIVE, AdminRole.SUPER_ADMIN) <= 1) {
+            throw new IllegalArgumentException("마지막 활성 최고 관리자는 삭제하거나 권한을 낮출 수 없습니다.");
+        }
+    }
 
-        adminRepository.delete(admin);
-        adminRepository.flush();
+    private void rejectPassword(AdminRequest request) {
+        if (request.getPassword() != null && !request.getPassword().isBlank()) {
+            throw new IllegalArgumentException("비밀번호는 Keycloak에서 설정하거나 변경해 주세요.");
+        }
+    }
 
-        deleteKeycloakUser(keycloakId);
+    @Transactional
+    public AdminResponse link(Long id, String keycloakId) {
+        accountSync.lock();
+        Admin admin = adminRepository.findById(id).orElseThrow(() -> new AdminNotFoundException(id));
+        if (admin.getState() != Admin.State.UNLINKED) {
+            throw new IllegalArgumentException("미연결 계정만 연결할 수 있습니다.");
+        }
+        if (adminRepository.findByKeycloakId(keycloakId).isPresent()) {
+            throw new IllegalArgumentException("이미 다른 관리자에 연결된 사용자 ID입니다.");
+        }
+        // Explicit SUPER_ADMIN confirmation; never infer identity from a login's username.
+        accountGateway.verifyLink(admin, keycloakId);
+        admin.setKeycloakId(keycloakId);
+        admin.setState(Admin.State.ACTIVE);
+        accountSync.enqueue(admin);
+        return toResponse(admin);
     }
 
     public List<AdminResponse> searchAdmins(String keyword) {
@@ -112,96 +148,6 @@ public class AdminService {
 
     private String normalizeKeyword(String keyword) {
         return keyword == null ? "" : keyword.trim();
-    }
-
-    private String createKeycloakUser(AdminRequest request) {
-        UserRepresentation user = new UserRepresentation();
-        user.setUsername(request.getUsername());
-        user.setFirstName(request.getName());
-        user.setEnabled(true);
-
-        if (request.getPassword() != null && !request.getPassword().isBlank()) {
-            CredentialRepresentation credential = new CredentialRepresentation();
-            credential.setType(CredentialRepresentation.PASSWORD);
-            credential.setValue(request.getPassword());
-            credential.setTemporary(false);
-
-            user.setCredentials(List.of(credential));
-        }
-
-        Response response = keycloakAdminClient.realm(REALM_NAME).users().create(user);
-
-        try {
-            if (response.getStatus() != 201) {
-                throw new RuntimeException("Keycloak 사용자 생성 실패 (아이디 중복 등): HTTP 상태 코드 " + response.getStatus());
-            }
-
-            return extractCreatedUserId(response)
-                    .or(() -> findKeycloakUserIdByUsername(request.getUsername()))
-                    .orElseThrow(() -> new IllegalStateException("생성된 Keycloak 사용자 ID를 찾을 수 없습니다."));
-        } finally {
-            response.close();
-        }
-    }
-
-    private Optional<String> extractCreatedUserId(Response response) {
-        URI location = response.getLocation();
-        if (location == null || location.getPath() == null) {
-            return Optional.empty();
-        }
-
-        String path = location.getPath();
-        String userId = path.substring(path.lastIndexOf('/') + 1);
-        return userId.isBlank() ? Optional.empty() : Optional.of(userId);
-    }
-
-    private void updateKeycloakUser(Admin admin, String oldUsername, AdminRequest request) {
-        String keycloakId = getKeycloakId(admin, oldUsername);
-
-        UserRepresentation user = keycloakAdminClient.realm(REALM_NAME).users().get(keycloakId).toRepresentation();
-        user.setUsername(request.getUsername());
-        user.setFirstName(request.getName());
-        user.setEnabled(true);
-
-        keycloakAdminClient.realm(REALM_NAME).users().get(keycloakId).update(user);
-
-        if (request.getPassword() != null && !request.getPassword().trim().isEmpty()) {
-            updateKeycloakPassword(keycloakId, request.getPassword());
-        }
-    }
-
-    private void updateKeycloakPassword(String keycloakId, String newPassword) {
-        CredentialRepresentation credential = new CredentialRepresentation();
-        credential.setType(CredentialRepresentation.PASSWORD);
-        credential.setValue(newPassword);
-        credential.setTemporary(false);
-
-        keycloakAdminClient.realm(REALM_NAME).users().get(keycloakId).resetPassword(credential);
-    }
-
-    private void deleteKeycloakUser(String keycloakId) {
-        keycloakAdminClient.realm(REALM_NAME).users().get(keycloakId).remove();
-    }
-
-    private String getKeycloakId(Admin admin, String usernameFallback) {
-        if (admin.getKeycloakId() != null && !admin.getKeycloakId().isBlank()) {
-            return admin.getKeycloakId();
-        }
-
-        String keycloakId = findKeycloakUserIdByUsername(usernameFallback)
-                .orElseThrow(() -> new IllegalArgumentException("Keycloak에서 해당 사용자를 찾을 수 없습니다."));
-
-        admin.setKeycloakId(keycloakId);
-        return keycloakId;
-    }
-
-    private Optional<String> findKeycloakUserIdByUsername(String username) {
-        List<UserRepresentation> users = keycloakAdminClient.realm(REALM_NAME).users().search(username, true);
-        return users.stream()
-                .filter(user -> username.equals(user.getUsername()))
-                .map(UserRepresentation::getId)
-                .filter(Objects::nonNull)
-                .findFirst();
     }
 
     private void validateDuplicateUsername(Long id, String username) {
@@ -288,6 +234,12 @@ public class AdminService {
         response.setName(admin.getName());
         response.setUsername(admin.getUsername());
         response.setRole(admin.getRole().name());
+        response.setState(admin.getState().name());
+        accountOutbox.findById(admin.getId()).ifPresent(job -> {
+            response.setSyncStatus(job.getStatus().name());
+            response.setSyncError(job.getLastError());
+            response.setSyncAttempts(job.getAttempts());
+        });
 
         List<String> permissionCodes = admin.getAdminPermissions().stream()
                 .map(AdminPermission::getPermission)

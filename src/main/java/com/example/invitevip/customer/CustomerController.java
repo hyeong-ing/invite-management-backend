@@ -3,6 +3,7 @@ package com.example.invitevip.customer;
 import com.example.invitevip.customer.dto.CustomerRequest;
 import com.example.invitevip.customer.dto.CustomerResponse;
 import com.example.invitevip.customer.dto.CustomerSearchResponse;
+import com.example.invitevip.customer.sync.SearchSyncService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
@@ -17,6 +18,7 @@ import java.util.List;
 public class CustomerController {
 
     private final CustomerService customerService;
+    private final SearchSyncService searchSync;
 
     @GetMapping
     @PreAuthorize("hasAnyRole('SUPER_ADMIN', 'ADMIN')")
@@ -52,8 +54,25 @@ public class CustomerController {
 
     @PostMapping("/sync")
     @PreAuthorize("hasRole('SUPER_ADMIN')")
-    public ResponseEntity<String> sync() {
-        customerService.syncAllToElasticsearch();
-        return ResponseEntity.ok("sync ok");
+    public SearchSyncService.RebuildResult sync() {
+        return searchSync.rebuild();
+    }
+
+    @GetMapping("/sync/status")
+    @PreAuthorize("hasRole('SUPER_ADMIN')")
+    public SearchSyncService.SyncStatus syncStatus() {
+        return searchSync.status();
+    }
+
+    @PostMapping("/sync/reconcile")
+    @PreAuthorize("hasRole('SUPER_ADMIN')")
+    public java.util.Map<String, Integer> reconcile() {
+        return java.util.Map.of("queued", searchSync.reconcile());
+    }
+
+    @PostMapping("/sync/retry")
+    @PreAuthorize("hasRole('SUPER_ADMIN')")
+    public java.util.Map<String, Integer> retry() {
+        return java.util.Map.of("queued", searchSync.retryFailed());
     }
 }
