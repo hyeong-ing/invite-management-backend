@@ -12,7 +12,7 @@ public class KeycloakConfig {
     @Value("${keycloak.server-url}")
     private String serverUrl;
 
-    @Value("${keycloak.realm}")
+    @Value("${keycloak.admin.realm:${keycloak.realm}}")
     private String realm;
 
     @Value("${keycloak.client-id}")
@@ -24,9 +24,16 @@ public class KeycloakConfig {
     @Value("${keycloak.admin.password}")
     private String adminPassword;
 
-    @Bean
+    @Bean(destroyMethod = "close")
     public Keycloak keycloakAdminClient() {
         return KeycloakBuilder.builder()
+                .resteasyClient(new org.jboss.resteasy.client.jaxrs.internal.ResteasyClientBuilderImpl()
+                        .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
+                        .readTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                        .connectionCheckoutTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
+                        .connectionPoolSize(4)
+                        .register(org.keycloak.admin.client.JacksonProvider.class)
+                        .build())
                 .serverUrl(serverUrl)
                 .realm(realm)
                 .clientId(clientId)

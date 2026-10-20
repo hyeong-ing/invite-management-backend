@@ -38,10 +38,20 @@ dependencies {
 	annotationProcessor 'org.projectlombok:lombok'
 	testImplementation 'org.springframework.boot:spring-boot-starter-test'
 	testImplementation 'org.springframework.security:spring-security-test'
+	testRuntimeOnly 'com.h2database:h2:2.2.224'
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 
 }
 
 tasks.named('test') {
-	useJUnitPlatform()
+	useJUnitPlatform { excludeTags 'external' }
+}
+
+tasks.register('externalTest', Test) {
+	description = 'Runs isolated MySQL/Elasticsearch integration tests (compose.sync-test.yml).'
+	group = 'verification'
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	useJUnitPlatform { includeTags 'external' }
+	shouldRunAfter tasks.named('test')
 }

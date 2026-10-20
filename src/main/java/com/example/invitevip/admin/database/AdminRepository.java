@@ -9,6 +9,8 @@ import java.util.Optional;
 
 public interface AdminRepository extends JpaRepository<Admin, Long> {
 
+    long countByStateAndRole(Admin.State state, com.example.invitevip.admin.entity.AdminRole role);
+
     boolean existsByUsername(String username);
     @EntityGraph(attributePaths = {"adminPermissions", "adminPermissions.permission"})
     Optional<Admin> findByUsername(String username);

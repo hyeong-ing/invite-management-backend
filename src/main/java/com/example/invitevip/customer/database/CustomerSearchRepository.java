@@ -10,6 +10,7 @@ public interface CustomerSearchRepository extends ElasticsearchRepository<Custom
     @Query("""
     {
       "bool": {
+        "must_not": [{ "term": { "deleted": true } }],
         "should": [
           { "match": { "name": { "query": "?0" } } },
           { "match": { "note": { "query": "?0" } } },

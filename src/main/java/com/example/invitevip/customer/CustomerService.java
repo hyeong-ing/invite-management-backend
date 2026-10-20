@@ -8,7 +8,9 @@ import com.example.invitevip.customer.dto.CustomerRequest;
 import com.example.invitevip.customer.dto.CustomerResponse;
 import com.example.invitevip.customer.dto.CustomerSearchResponse;
 import com.example.invitevip.customer.mapper.CustomerSearchMapper;
-import jakarta.transaction.Transactional;
+import com.example.invitevip.customer.sync.SearchSyncService;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
@@ -21,14 +23,16 @@ public class CustomerService {
     private final CustomerRepository customerRepository;
     private final CustomerSearchRepository customerSearchRepository;
     private final CustomerSearchMapper customerSearchMapper;
+    private final SearchSyncService searchSync;
 
     @Autowired
     public CustomerService(CustomerRepository customerRepository,
                            CustomerSearchRepository customerSearchRepository,
-                           CustomerSearchMapper customerSearchMapper) {
+                           CustomerSearchMapper customerSearchMapper, SearchSyncService searchSync) {
         this.customerRepository = customerRepository;
         this.customerSearchRepository = customerSearchRepository;
         this.customerSearchMapper = customerSearchMapper;
+        this.searchSync = searchSync;
     }
 
 
@@ -38,9 +42,9 @@ public class CustomerService {
                 .toList();
     }
 
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public CustomerResponse save(CustomerRequest request) {
-
+        searchSync.beforeCustomerChange();
         InviteCode inviteCode = InviteCode.of(request.getCode());
 
         if (customerRepository.existsByInviteCode(inviteCode)) {
@@ -56,14 +60,15 @@ public class CustomerService {
         );
 
         Customer saved = customerRepository.save(customer);
-        customerSearchRepository.save(customerSearchMapper.toSearchEntity(saved));
+        searchSync.record(saved);
 
         return toResponse(saved);
     }
 
 
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public CustomerResponse update(Long id, CustomerRequest request) {
+        searchSync.beforeCustomerChange();
         Customer customer = customerRepository.findById(id)
                 .orElseThrow(() -> new CustomerNotFoundException(id));
 
@@ -83,27 +88,19 @@ public class CustomerService {
                 request.getNote()
         );
 
-        customerSearchRepository.save(customerSearchMapper.toSearchEntity(customer));
+        searchSync.record(customer);
 
         return toResponse(customer);
     }
 
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public void delete(Long id) {
+        searchSync.beforeCustomerChange();
         Customer customer = customerRepository.findById(id)
                 .orElseThrow(() -> new CustomerNotFoundException(id));
 
         customerRepository.delete(customer);
-        customerSearchRepository.deleteById(id);
-    }
-
-    @Transactional
-    public void syncAllToElasticsearch() {
-        List<Customer> list = customerRepository.findAll();
-
-        for (Customer c : list) {
-            customerSearchRepository.save(customerSearchMapper.toSearchEntity(c));
-        }
+        searchSync.recordDeletion(id);
     }
 
     public List<CustomerSearchResponse> searchCustomers(String keyword) {

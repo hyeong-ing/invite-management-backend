@@ -12,12 +12,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.HashSet;
-import java.util.Optional;
 import java.util.Set;
 
 @Service
 @RequiredArgsConstructor
-@Transactional
+@Transactional(readOnly = true)
 public class AdminAuthorityService {
 
     private static final String CUSTOMER_READ = "CUSTOMER_READ";
@@ -26,27 +25,11 @@ public class AdminAuthorityService {
 
     public Set<GrantedAuthority> loadAuthorities(Jwt jwt) {
         String keycloakId = jwt.getSubject();
-        String preferredUsername = jwt.getClaimAsString("preferred_username");
-
-        Optional<Admin> optionalAdmin = Optional.empty();
-
-        if (keycloakId != null && !keycloakId.isBlank()) {
-            optionalAdmin = adminRepository.findByKeycloakId(keycloakId);
-        }
-
-        if (optionalAdmin.isEmpty() && preferredUsername != null && !preferredUsername.isBlank()) {
-            optionalAdmin = adminRepository.findByUsername(preferredUsername);
-        }
-
-        if (optionalAdmin.isEmpty()) {
-            return Set.of();
-        }
-
-        Admin admin = optionalAdmin.get();
-
-        if ((admin.getKeycloakId() == null || admin.getKeycloakId().isBlank())
-                && keycloakId != null && !keycloakId.isBlank()) {
-            admin.setKeycloakId(keycloakId);
+        Admin admin = keycloakId == null ? null : adminRepository.findByKeycloakId(keycloakId).orElse(null);
+        if (admin == null || admin.getState() != Admin.State.ACTIVE) {
+            throw new org.springframework.security.oauth2.core.OAuth2AuthenticationException(
+                    new org.springframework.security.oauth2.core.OAuth2Error("invalid_token"),
+                    "활성 관리자 계정이 아닙니다.");
         }
 
         Set<GrantedAuthority> authorities = new HashSet<>();
