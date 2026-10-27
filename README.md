@@ -8,7 +8,7 @@
   이전 프로젝트에서 회원가입과 로그인을 구현했지만, 로그아웃이나 인증 상태 유지, 권한 처리까지 깊게 다루지 못했습니다. <br/>
   그리고 DB도 H2 위주로만 사용해서 실제 DB를 설계하고 관리하는 경험이 부족하다고 느꼈습니다.<br/>
   그래서 이번 프로젝트에서는 Keycloak을 활용한 인증, Spring Security 기반의 권한 처리,<br/>
-  MySQL을 사용한 고객/관리자 데이터 관리까지 경험하기로 했습니다. <br/>
+  MySQL을 사용한 고객·관리자 데이터 관리까지 경험하기로 했습니다. <br/>
   <br/>
 
   <br/>
@@ -47,17 +47,20 @@
 + 사용자는 초대코드를 입력해 고객 등급별 안내 페이지로 이동합니다.
 + 관리자는 Keycloak 로그인을 통해 인증을 진행하고 JWT를 포함해 백엔드 API를 호출합니다.
 + 초대코드 확인은 로그인 없이 사용할 수 있습니다. 고객 관리와 관리자 권한 관리 API는 Spring Security로 JWT와 권한을 검증합니다.
-+ 고객 / 관리자 / 권한 데이터는 MySQL에 저장하고 고객 검색 데이터는 Elasticsearch에 저장해 검색 기능에 활용합니다.
-+ Keycloak Admin Client를 사용해 서비스 관리자 정보와 Keycloak 로그인 계정을 함께 관리합니다.
++ 고객·관리자·권한 데이터는 MySQL에 저장하고 고객 검색 데이터는 Elasticsearch에 저장해 검색 기능에 활용합니다.
++ MySQL과 Elasticsearch·Keycloak 사이의 데이터 변경은 Outbox를 통해 별도로 반영하고 실패한 작업은 재시도하도록 구성했습니다.
+
 
 <br/><br/> 
 
 ### 🔶 기술 스택 & 라이브러리
 + 백엔드 : Java 17, Spring Boot 3.5.6
-+ 데이터베이스 : MySQL
++ 데이터베이스 : MySQL, Spring Data JPA
 + 검색 엔진 : Elasticsearch, Spring Data Elasticsearch
 + 보안 : Spring Security, OAuth2 Resource Server, JWT, Keycloak
 + 관리자 계정 연동 : Keycloak Admin Client
++ 데이터 동기화 : Transactional Outbox, Spring Scheduling
++ 실행 환경 : Docker
   
 <br/><br/>
 
@@ -66,6 +69,7 @@
 + MySQL과 JPA로 고객, 관리자, 권한 데이터를 관리하는 실제 DB 기반 프로젝트 경험하기.
 + Elasticsearch를 활용한 고객 검색 기능 구현하기.
 + Keycloak과 Spring Security를 활용한 로그인/로그아웃 및 권한 기반 접근 제어 경험하기.
++ 서로 다른 시스템의 데이터 변경 과정에서 발생할 수 있는 불일치를 이해하고 복구 구조 구현하기.
 + Docker를 사용해 Keycloak, Elasticsearch 같은 외부 시스템을 실행하고 백엔드와 연동하는 흐름 이해하기.
 
 <br/><br/>
@@ -124,35 +128,39 @@ customerRepository.findByInviteCode(newInviteCode).ifPresent(found -> {
 
 ----
 
-3) MySQL 저장 후 Elasticsearch 검색 인덱스 함께 반영 <br/>
-고객 원본 데이터는 MySQL에 저장하고, 검색에 사용할 데이터는 Elasticsearch 인덱스에도 함께 반영했습니다.
+3) Outbox 기반 Elasticsearch 검색 데이터 동기화 <br/>
+고객 원본 데이터는 MySQL에 저장하고, 검색에 사용할 데이터는 Elasticsearch에 별도로 반영했습니다.
 
-+ 고객 등록 시 MySQL에 고객 정보를 저장합니다.
-+ 저장된 고객 정보를 검색용 Entity로 변환해 Elasticsearch에도 저장합니다.
-+ 고객 수정∙삭제 시에도 Elasticsearch 데이터를 함께 갱신하거나 삭제해 검색 결과가 최신 상태를 유지하도록 했습니다.
++ 고객 등록·수정·삭제 시 MySQL에 고객 변경과 Outbox 이벤트를 같은 트랜잭션으로 저장합니다.
++ Spring Scheduler가 대기 중인 이벤트를 읽어 Elasticsearch에 반영합니다.
++ 반영에 실패하면 일정 시간 후 재시도하고 재시도 한도를 초과하면 FAILED 상태로 관리합니다.
++ 별도의 정합성 점검 작업을 통해 MySQL과 검색 인덱스의 불일치도 확인하도록 했습니다.
++ 별도의 메시지 브로커나 CDC 없이 MySQL과 Spring Scheduling으로 동기화 구조를 구현했습니다.
 
 ```java
 Customer saved = customerRepository.save(customer);
-
-customerSearchRepository.save(
-        customerSearchMapper.toSearchEntity(saved));
+searchSync.record(saved);
 ```
-```java
-customer.update(
-        request.getName(),
-        request.getGrade(),
-        request.getPhone(),
-        newInviteCode,
-        request.getNote()
-);
 
-customerSearchRepository.save(
-        customerSearchMapper.toSearchEntity(customer)
-);
-```
 ```java
 customerRepository.delete(customer);
-customerSearchRepository.deleteById(id);
+searchSync.recordDeletion(id);
+```
+
+Outbox에 기록된 작업은 별도 Scheduler가 처리합니다.
+
+```java
+@Scheduled(
+    fixedDelayString = "${app.search-sync.poll-delay-ms:2000}",
+    initialDelayString = "2000"
+)
+public void deliver() {
+    try {
+        sync.processPending();
+    } catch (Exception e) {
+        log.error("Search outbox processing failed; committed work will be retried", e);
+    }
+}
 ```
 
 <br/><br/>
@@ -165,6 +173,7 @@ customerSearchRepository.deleteById(id);
 + name, note는 한글 검색을 고려해 analyzer를 적용했습니다.
 + 고객 이름에서 초성을 추출해 nameChosung 필드에 저장했습니다.
 + 예를 들어 홍길동은 ㅎㄱㄷ으로 저장되어 초성 검색이 가능합니다.
++ 삭제된 고객은 검색 결과에 포함되지 않도록 처리했습니다.
 
 ```java
 public CustomerSearchEntity toSearchEntity(Customer customer) {
@@ -215,31 +224,62 @@ List<CustomerSearchEntity> searchAll(String keyword);
 Keycloak에서 발급받은 JWT를 Spring Security Resource Server가 검증하고 <br/>
 DB에 저장된 관리자 권한을 함께 읽어 API 접근 권한을 제어했습니다.
 
-+ JWT의 realm role과 DB에 저장된 관리자 role을 Spring Security 권한 형식인 ROLE_ADMIN, ROLE_SUPER_ADMIN으로 사용합니다.
-+ DB의 관리자 권한을 조회해 CUSTOMER_SEARCH, CUSTOMER_ADD, CUSTOMER_EDIT, CUSTOMER_DELETE 권한으로 변환합니다.
++ JWT의 sub 값으로 MySQL에 연결된 관리자를 조회합니다.
++ 관리자 상태가 ACTIVE가 아니면 인증을 거부합니다.
++ DB에 저장된 관리자 역할과 권한을 Spring Security의 Authority로 변환합니다.
 + Controller에서는 @PreAuthorize를 사용해 API별 접근 권한을 분리했습니다.
++ 이를 통해 Keycloak은 로그인 인증을 담당하고 서비스의 역할 및 세부 권한은 MySQL을 기준으로 관리하도록 분리했습니다.
 
 ```java
-authorities.addAll(extractRealmRoles(jwt));
-authorities.addAll(adminAuthorityService.loadAuthorities(jwt));
+String keycloakId = jwt.getSubject();
+
+Admin admin = keycloakId == null ? null
+        : adminRepository.findByKeycloakId(keycloakId).orElse(null);
 ```
 ```java
 if (admin.getRole() != null) {
-    authorities.add(new SimpleGrantedAuthority("ROLE_" + admin.getRole().name()));
-}
-
-for (AdminPermission adminPermission : admin.getAdminPermissions()) {
-    Permission permission = adminPermission.getPermission();
-
-    if (permission == null || permission.getCode() == null) {
-        continue;
-    }
-
     authorities.add(new SimpleGrantedAuthority(
-            permission.getCode().trim().toUpperCase()
+            "ROLE_" + admin.getRole().name()
     ));
 }
 ```
+<br/><br/>
+
+----
+
+6) Outbox 기반 Keycloak 관리자 계정 동기화
+
+관리자 정보는 MySQL에 저장하고 실제 로그인 계정은 Keycloak에 생성하도록 구성했습니다.
+
++ 관리자 등록 시 MySQL에 관리자 정보와 Outbox 작업을 함께 저장합니다.
++ 생성 대기 상태인 PENDING_CREATE에서 Keycloak 계정 생성이 완료되면 ACTIVE로 변경합니다.
++ 관리자 수정·삭제도 Outbox에 기록하고 별도 작업으로 반영합니다.
++ 실패한 작업은 재시도하며, 계정 상태에 따라 서비스 접근 여부를 제어합니다.
+
+```java
+admin.setState(Admin.State.PENDING_CREATE);
+
+Admin savedAdmin = adminRepository.save(admin);
+accountSync.enqueue(savedAdmin);
+```
+
+Keycloak 연동은 별도 작업에서 수행합니다.
+
+```java
+case PENDING_CREATE -> {
+    admin.setKeycloakId(gateway.ensureCreated(admin));
+    gateway.updateProfile(admin);
+    admin.setState(Admin.State.ACTIVE);
+}
+```
+
+관리자 삭제 시에는 먼저 DELETING 상태로 변경하고 Keycloak 계정 삭제를 요청합니다.
+
+```java
+admin.setState(Admin.State.DELETING);
+accountSync.enqueue(admin);
+```
+Keycloak 계정 삭제가 완료되기 전에도 DB의 관리자 상태를 통해 서비스 접근을 차단할 수 있도록 했습니다.
 
 
 <br/><br/><br/>
@@ -313,80 +353,32 @@ admin.getAdminPermissions().add(adminPermission);
 
 1) 문제 발생 <br/>
 + 고객 원본 데이터는 MySQL에 저장하고, 검색 데이터는 Elasticsearch에 저장했습니다.
-+ 고객 정보가 변경되었을 때 Elasticsearch 인덱스가 함께 갱신되지 않으면 검색 결과가 실제 DB와 달라질 수 있었습니다.
++ 기존에는 고객 등록·수정·삭제 시 Elasticsearch도 바로 갱신하도록 구현했습니다.
++ 불일치가 발생하면 수동 동기화 API를 통해 검색 데이터를 다시 맞추는 방식이었습니다.
 
 <br/><br/>
 
 2) 원인 파악 <br/>
-+ MySQL과 Elasticsearch는 서로 다른 저장소이기 때문에, MySQL 저장만으로 Elasticsearch 데이터가 자동 변경되지 않습니다.
-+ 고객 등록, 수정, 삭제 시점에 검색 인덱스도 함께 반영해야 했습니다.
++ MySQL과 Elasticsearch는 서로 다른 저장소이기 때문에 하나의 DB 트랜잭션으로 처리할 수 없습니다.
++ MySQL 변경이 성공한 뒤 Elasticsearch 반영에 실패하면 두 저장소의 데이터가 달라질 수 있습니다.
++ 수동 동기화만으로는 실패한 변경 작업을 자동으로 추적하거나 복구하기 어려웠습니다.
 
 <br/><br/>
 
 3) 문제 해결 <br/>
-+ 고객 등록 / 수정 / 삭제 시 Elasticsearch 인덱스도 함께 저장하거나 삭제하도록 처리했습니다.
-+ MySQL 기준으로 검색 데이터를 다시 맞추는 수동 동기화 API도 추가했습니다.
-+ 현재 고객 정보를 모두 저장한 뒤, MySQL에는 없고 Elasticsearch에만 남은 고객 데이터를 삭제합니다.
-+ 현재 고객 정보를 저장하는 도중 오류가 발생하면 남은 검색 데이터를 삭제하는 단계는 진행하지 않습니다.
++ Transactional Outbox 패턴을 적용해 고객 데이터와 검색 변경 이벤트를 MySQL 트랜잭션에 함께 저장했습니다.
++ Scheduler가 Outbox의 PENDING 작업을 읽어 Elasticsearch에 반영하고 실패 시 재시도하도록 변경했습니다.
++ 주기적으로 MySQL과 검색 인덱스를 비교해 불일치 항목을 다시 등록하도록 했습니다.
++ 오래된 이벤트가 최신 변경을 덮어쓰지 않도록 Outbox ID를 Elasticsearch의 외부 버전으로 활용했습니다.
++ 고객 삭제는 삭제 표시 데이터인 Tombstone을 기록해 처리하도록 했습니다.
   
 ```java
 Customer saved = customerRepository.save(customer);
-
-customerSearchRepository.save(
-        customerSearchMapper.toSearchEntity(saved)
-);
+searchSync.record(saved);
 ```
 ```java
-customer.update(
-        request.getName(),
-        request.getGrade(),
-        request.getPhone(),
-        newInviteCode,
-        request.getNote()
-);
-
-customerSearchRepository.save(
-        customerSearchMapper.toSearchEntity(customer)
-);
-```
-```java
-customerRepository.delete(customer);
-customerSearchRepository.deleteById(id);
-```
-```java
-@PostMapping("/sync")
-@PreAuthorize("hasRole('SUPER_ADMIN')")
-public ResponseEntity<String> sync() {
-    customerService.syncAllToElasticsearch();
-    return ResponseEntity.ok("sync ok");
-}
-```
-
-아래는 수동 동기화 처리 코드입니다.
-
-```java
-@Transactional
-public void syncAllToElasticsearch() {
-    List<Customer> customers = customerRepository.findAll();
-    Set<Long> customerIds = customers.stream()
-            .map(Customer::getId)
-            .collect(Collectors.toSet());
-
-    List<CustomerSearchEntity> staleCustomers = new ArrayList<>();
-    for (CustomerSearchEntity document : customerSearchRepository.findAll()) {
-        if (!customerIds.contains(document.getId())) {
-            staleCustomers.add(document);
-        }
-    }
-
-    // 현재 고객 정보가 모두 반영된 뒤 불필요한 검색 데이터를 삭제합니다.
-    for (Customer customer : customers) {
-        customerSearchRepository.save(customerSearchMapper.toSearchEntity(customer));
-    }
-    if (!staleCustomers.isEmpty()) {
-        customerSearchRepository.deleteAll(staleCustomers);
-    }
-}
+index.write(document, Math.multiplyExact(event.getId(), 2L));
+event.complete(clock.instant());
 ```
 
 <br/><br/>
@@ -395,74 +387,83 @@ public void syncAllToElasticsearch() {
 
 1) 문제 발생 <br/>
 + 관리자 정보는 MySQL에 저장하고 실제 로그인 계정은 Keycloak에 생성했습니다.
-+ 둘 중 하나만 반영되면 DB에는 있지만 로그인할 수 없거나, 로그인은 되지만 서비스 권한을 조회할 수 없는 문제가 생길 수 있었습니다.
++ 기존에는 관리자 생성·수정·삭제 과정에서 Keycloak API를 직접 호출했습니다.
++ 이 과정에서 한쪽 작업만 성공하면 관리자 정보와 실제 로그인 계정이 달라질 수 있었습니다.
 
 <br/><br/>
 
 2) 원인 파악 <br/>
-+ MySQL과 Keycloak은 서로 다른 시스템이기 때문에 하나의 트랜잭션으로 자동 처리되지 않습니다.
-+ Keycloak 계정과 MySQL 관리자 데이터를 연결할 식별값도 필요했습니다.
++ MySQL과 Keycloak은 하나의 트랜잭션으로 관리되지 않습니다.
++ Keycloak 계정 생성 후 DB 커밋이 실패하면 로그인 계정만 남을 수 있습니다.
++ 반대로 DB 변경 후 Keycloak 요청에 실패하면 변경 내용이 외부 계정에 반영되지 않을 수 있습니다.
 
 <br/><br/>
 
 3) 문제 해결 <br/>
-+ 관리자 생성 시 saveAndFlush()로 DB insert와 제약 조건 검사를 먼저 실행한 뒤 Keycloak 사용자 생성을 진행했습니다.
-+ 생성된 Keycloak 사용자 id를 admin.keycloakId에 저장해 MySQL 관리자와 Keycloak 계정을 연결했습니다.
-+ 관리자 수정 / 삭제 시에도 MySQL 데이터와 Keycloak 사용자 계정을 함께 반영하도록 처리했습니다.
++ 관리자 데이터와 Outbox 작업을 하나의 MySQL 트랜잭션에 저장하도록 변경했습니다.
++ Scheduler가 관리자 상태에 따라 Keycloak 계정을 생성·수정·삭제하도록 구성했습니다.
++ 계정 생성 시 고유한 accountRef를 Keycloak 사용자 속성에 기록해 재시도 과정에서 동일 계정인지 확인하도록 했습니다.
++ 계정 생성·삭제에 실패해도 작업 상태를 보존하고 다시 시도할 수 있도록 했습니다.
++ 관리자 계정의 상태가 ACTIVE가 아니면 기존 JWT가 있더라도 보호된 API에 접근할 수 없도록 했습니다.
   
 ```java
-Admin savedAdmin = adminRepository.saveAndFlush(admin);
-
-String keycloakId = createKeycloakUser(request);
-savedAdmin.setKeycloakId(keycloakId);
-
-adminRepository.flush();
+admin.setState(Admin.State.PENDING_CREATE);
+Admin savedAdmin = adminRepository.save(admin);
+accountSync.enqueue(savedAdmin);
 ```
 ```java
-adminRepository.flush();
-updateKeycloakUser(admin, oldUsername, request);
+user.setAttributes(
+    Map.of(OWNER_ATTRIBUTE, List.of(admin.getAccountRef()))
+);
 ```
-```java
-String keycloakId = getKeycloakId(admin, admin.getUsername());
 
-adminRepository.delete(admin);
-adminRepository.flush();
-
-deleteKeycloakUser(keycloakId);
-```
-```java
-if (admin.getKeycloakId() == null || admin.getKeycloakId().isBlank()) {
-    admin.setKeycloakId(keycloakId);
-}
-```
 
 <br/><br/><br/>
 
+### 🔶 테스트 및 검증
+Outbox 적용 이후에는 정상적인 데이터 반영뿐 아니라 외부 시스템 장애와 재시도 상황을 확인하는 테스트를 추가했습니다.
+
+### [ 주요 검증 항목 ]
+
++ 고객 데이터와 Outbox 저장의 트랜잭션 롤백
++ Elasticsearch 장애 발생 후 자동 재시도 및 복구
++ 오래된 이벤트가 최신 고객 정보나 삭제 상태를 덮어쓰지 않는지 확인
++ 검색 인덱스의 누락·불일치 데이터 복구
++ Keycloak 계정 생성·삭제 도중 실패했을 때 재실행 처리
++ 관리자 계정 상태에 따른 JWT 인증 및 API 접근 제어
+
+<br/>
+
+### [ Test Stack ]
+
+```JUnit 5``` ```Spring Boot Test```  ```Mockito``` ```MockMvc```
+
+<br/><br/>
+
+
 ### 🔶 아쉬운 점 및 개선 방향
 
-### [ 외부 검색 인덱스 반영 방식 ] <br/>
+### [ Outbox 기반 검색 인덱스 반영 방식 ] <br/>
 
 1) 현재 처리 방식 <br/>
-+ 고객 원본 데이터는 MySQL에 저장하고, 검색에 사용할 데이터는 Elasticsearch 인덱스에도 함께 저장했습니다.
-+ 고객 등록, 수정, 삭제 시점에 Elasticsearch를 바로 호출해 검색 결과가 최신 상태에 가깝게 유지되도록 처리했습니다.
-+ 수동 동기화 API는 MySQL의 현재 고객 정보를 검색 엔진에 다시 저장하고 MySQL에 없는 검색 데이터를 삭제합니다.
++ 고객 데이터 변경과 Outbox 저장을 하나의 트랜잭션으로 처리합니다.
++ Scheduler가 대기 중인 작업을 Elasticsearch에 반영하고 실패한 작업은 재시도합니다.
++ 정합성 점검과 인덱스 재구축 기능도 별도로 구현했습니다.
 
 
 <br/><br/>
 
 2) 아쉬운 점 <br/>
-+ MySQL과 Elasticsearch는 서로 다른 저장소이기 때문에 하나의 트랜잭션으로 완전히 묶이지는 않습니다.
-+ 한쪽 작업이 성공한 뒤 다른 쪽 작업이나 DB 커밋이 실패하면 두 저장소의 데이터가 어긋날 수 있습니다.
-+ 현재 수동 동기화는 고객 수가 적고 동기화 중 다른 고객 변경 작업이 없는 상황을 전제로 합니다.
-+ 동기화 도중의 동시 변경과 일부 반영 실패에 대한 자동 복구는 추가로 보완할 부분입니다.
++ MySQL 변경과 Elasticsearch 반영 사이에는 시간 차이가 발생할 수 있습니다.
++ 장시간 장애가 발생하면 Outbox에 미처리 작업이 쌓일 수 있습니다.
++ 처리 완료된 Outbox 이력도 계속 저장되므로 데이터 보관 및 정리 정책이 필요합니다.
 
 <br/><br/>
 
 3) 개선 방향 <br/>
-+ 실제 서비스라면 고객 데이터 변경 시 Elasticsearch를 바로 호출하기보다 변경 이벤트를 별도로 저장하는 방식을 고려할 수 있습니다.
-+ 예를 들어 변경 이력을 DB에 별도로 저장하는 Outbox Pattern이나 메시지 큐를 이용해 검색 데이터 반영 실패를 추적하고 재시도하는 구조를 고려할 수 있습니다.
-+ Outbox Pattern과 메시지 큐는 향후 개선 방안이며, 현재 프로젝트에는 적용하지 않았습니다.
-+ 현재 프로젝트에서는 개인 프로젝트 규모를 고려해 CRUD 시점에 즉시 반영하고 필요 시 수동 동기화 API로 복구할 수 있는 단순한 구조를 선택했습니다.
++ 실제 운영 환경에서는 미처리 작업 수와 실패 상태를 지속적으로 확인할 수 있는 모니터링을 추가할 수 있습니다.
++ 완료된 Outbox 이벤트는 재처리 및 정합성 복구에 필요한 범위를 고려해 보관 정책을 정의할 수 있습니다.
++ 현재 프로젝트에서는 별도의 메시지 브로커나 CDC 없이 기존 MySQL과 Spring Boot만으로 복구 가능한 구조를 구현하는 데 집중했습니다.
 
 <br/><br/>
 
@@ -471,23 +472,23 @@ if (admin.getKeycloakId() == null || admin.getKeycloakId().isBlank()) {
 ### [ Keycloak 계정 연동 안정성 ] <br/>
 
 1) 현재 처리 방식 <br/>
-+ 관리자 정보는 MySQL에 저장하고 실제 로그인 계정은 Keycloak에 생성했습니다.
-+ 관리자 생성 시 `saveAndFlush()`로 DB insert와 제약 조건 검사를 먼저 실행한 뒤 Keycloak 사용자 생성을 진행했습니다.
-+ 생성된 Keycloak 사용자 id를 `admin.keycloakId`에 저장해 MySQL 관리자 데이터와 Keycloak 계정을 연결했습니다.
++ 관리자 정보와 Outbox 작업을 MySQL에 저장하고 Keycloak 연동은 별도 작업으로 처리합니다.
++ accountRef와 keycloakId를 활용해 계정 연결 관계를 확인합니다.
++ 관리자 상태를 기준으로 서비스 접근을 제어하고 실패한 동기화 작업을 다시 실행할 수 있도록 했습니다.
 
 <br/><br/>
 
 2) 아쉬운 점 <br/>
-+ MySQL과 Keycloak 역시 서로 다른 시스템이기 때문에 완전히 하나의 트랜잭션으로 처리되지는 않습니다.
-+ 예를 들어 Keycloak 사용자 생성은 성공했지만 이후 DB 커밋이 실패하거나, 수정 과정에서 일부 정보만 반영되는 상황이 생길 수 있습니다.
++ MySQL과 Keycloak은 서로 다른 시스템이므로 모든 작업이 즉시 동일한 상태가 되는 것은 아닙니다.
++ Keycloak 장애가 장기간 지속되거나 계정 연결 관계를 확인할 수 없으면 관리자 확인이 필요합니다.
++ 재시도로 해결하기 어려운 오류는 별도 복구 절차가 필요할 수 있습니다.
 
 <br/><br/>
 
 3) 개선 방향 <br/>
-+ 실제 서비스라면 관리자 생성, 수정, 삭제 요청을 상태값으로 관리하는 방식을 고려할 수 있습니다.
-+ 예를 들어 관리자 생성 요청을 먼저 DB에 저장하고 Keycloak 연동 작업은 별도 작업 큐에서 처리한 뒤 성공 시 ACTIVE, 실패 시 FAILED 상태로 관리할 수 있습니다.
-+ 이렇게 하면 Keycloak 장애나 중간 실패 상황을 추적하고 재시도하기 쉬워집니다.
-+ 현재 프로젝트에서는 구조가 지나치게 무거워지지 않도록 flush()와 keycloakId를 활용해 두 시스템의 연결 순서를 명확히 하는 방식으로 처리했습니다.
++ 실제 서비스라면 실패한 작업의 원인과 계정 상태를 확인할 수 있는 관리자용 모니터링 화면을 추가할 수 있습니다.
++ 계정 연결 오류나 장기 장애에 대한 운영 절차를 문서화하고 수동 복구 과정을 더 명확하게 만들 수 있습니다.
++ 현재는 개인 프로젝트 규모를 고려해 관리자 상태 관리와 재시도 기능을 중심으로 구현했습니다.
 
 <br/><br/>
 
@@ -496,24 +497,22 @@ if (admin.getKeycloakId() == null || admin.getKeycloakId().isBlank()) {
 ### [ 운영 환경을 고려한 설정 및 테스트 보강 ] <br/>
 
 1) 현재 처리 방식 <br/>
-+ 개발 과정에서는 로컬 환경에서 MySQL, Elasticsearch, Keycloak을 실행하며 기능 구현과 흐름 확인에 집중했습니다.
-+ 인증, 권한, 고객 검색, 관리자 관리 기능이 연결되는 전체 흐름을 우선적으로 구현했습니다.
-+ 수동 동기화 보완 후, 저장소 동작을 대신하는 Mock을 사용한 단위 테스트 6개를 추가했고 모두 통과했습니다.
-+ 현재 고객 갱신·추가, 검색에만 남은 고객 삭제, 빈 데이터 처리, 조회·저장 실패 시의 동작을 확인했습니다.
++ 로컬 환경에서 MySQL, Elasticsearch, Keycloak을 실행하며 전체 기능을 확인했습니다.
++ 설정값을 별도로 관리할 수 있도록 application.example.properties를 제공하고 있습니다.
++ Outbox의 재시도와 정합성 복구, 외부 시스템 연동을 검증하기 위한 테스트 코드를 작성했습니다.
 
 <br/><br/>
 
 2) 아쉬운 점 <br/>
-+ 현재 프로젝트는 로컬 실행과 시연을 기준으로 작성되어 있어, 실제 운영 환경을 기준으로 보면 설정값 관리와 외부 시스템 연동 테스트를 더 보강할 여지가 있습니다.
-+ 특히 DB, Elasticsearch, Keycloak처럼 외부 시스템에 의존하는 기능은 환경에 따라 동작 차이가 생길 수 있습니다.
++ 실제 운영 환경에서는 외부 시스템의 장애뿐 아니라 서버 재시작, 장기간 작업 누적, 동시 요청 증가 등의 상황도 고려해야 합니다.
++ 로컬 테스트만으로 실제 운영 환경의 모든 장애 상황을 검증하기는 어렵습니다.
 
 <br/><br/>
 
 3) 개선 방향 <br/>
 + 실제 서비스라면 DB 비밀번호, Keycloak 관리자 계정, Elasticsearch 접속 정보 같은 설정값을 환경 변수나 별도 Secret 관리 방식으로 분리하는 것이 좋습니다.
-+ 또한 Testcontainers 등을 활용해 MySQL과 Elasticsearch 연동 흐름을 실제 환경과 가깝게 검증할 수 있습니다.
-+ Keycloak의 경우 테스트 컨테이너나 테스트 Realm 구성을 추가해 인증 서버 연동 흐름까지 단계적으로 검증하는 방향으로 확장할 수 있습니다.
-+ 현재 프로젝트에서는 개인 학습과 기능 구현을 우선했기 때문에, 추후에는 설정 분리와 외부 시스템 통합 테스트를 보강하는 방향으로 개선할 수 있습니다.
++ 실패 작업 수, 처리 지연 시간 등을 확인하는 모니터링과 알림을 추가할 수 있습니다.
++ 다양한 장애 상황을 반복 검증할 수 있도록 외부 시스템 통합 테스트와 운영 환경 검증을 보강할 수 있습니다.
 
 <br/><br/>
 
