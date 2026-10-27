@@ -75,99 +75,8 @@
 <br/><br/>
 
 ### 🔶 핵심 로직
-1) 초대코드 검증 및 등급별 페이지 이동 <br/>
-사용자가 4자리 초대코드를 입력하면 백엔드에서 DB에 저장된 초대코드와 일치하는 고객을 조회합니다.
 
-+ 초대코드는 InviteCode 값 객체를 통해 숫자 4자리인지 검증합니다.
-+ 유효한 코드라면 고객 정보를 반환합니다.
-+ 그리고 프론트엔드에서 고객 등급에 따라 VIP, VVIP, DIAMOND 페이지로 이동합니다.
-
-```java
-public Optional<CustomerResponse> findByCode(String code) {
-    if (!InviteCode.isValid(code)) {
-        return Optional.empty();
-    }
-
-    return customerRepository.findByInviteCode(InviteCode.of(code))
-            .map(customerService::toResponse);
-}
-```
-```javascript
-const grade = (data.grade || "").trim().toUpperCase();
-
-if (grade === "VIP") navigate("/vip");
-else if (grade === "VVIP") navigate("/vvip");
-else if (grade === "DIAMOND") navigate("/diamond");
-```
-
-<br/><br/>
-
-----
-
-2) 고객 등록∙수정 시 초대코드 중복 방지 <br/>
-고객을 등록하거나 수정할 때 동일한 초대코드가 저장되지 않도록 검증했습니다.
-
-+ 등록 시에는 같은 초대코드가 이미 존재하는지 확인합니다.
-+ 수정 시에는 자기 자신의 기존 코드만 허용하고 다른 고객이 사용하는 코드만 중복으로 판단합니다.
-+ DB에서는 `code` 컬럼에 unique 제약 조건을 두어 한 번 더 중복을 방지했습니다.
-
-```java
-if (customerRepository.existsByInviteCode(inviteCode)) {
-    throw new DuplicateCodeException("초대코드가 중복되었습니다.");
-}
-```
-```java
-customerRepository.findByInviteCode(newInviteCode).ifPresent(found -> {
-    if (!found.getId().equals(id)) {
-        throw new DuplicateCodeException("초대코드가 중복되었습니다.");
-    }
-});
-```
-
-<br/><br/>
-
-----
-
-3) Outbox 기반 Elasticsearch 검색 데이터 동기화 <br/>
-고객 원본 데이터는 MySQL에 저장하고, 검색에 사용할 데이터는 Elasticsearch에 별도로 반영했습니다.
-
-+ 고객 등록·수정·삭제 시 MySQL에 고객 변경과 Outbox 이벤트를 같은 트랜잭션으로 저장합니다.
-+ Spring Scheduler가 대기 중인 이벤트를 읽어 Elasticsearch에 반영합니다.
-+ 반영에 실패하면 일정 시간 후 재시도하고 재시도 한도를 초과하면 FAILED 상태로 관리합니다.
-+ 별도의 정합성 점검 작업을 통해 MySQL과 검색 인덱스의 불일치도 확인하도록 했습니다.
-+ 별도의 메시지 브로커나 CDC 없이 MySQL과 Spring Scheduling으로 동기화 구조를 구현했습니다.
-
-```java
-Customer saved = customerRepository.save(customer);
-searchSync.record(saved);
-```
-
-```java
-customerRepository.delete(customer);
-searchSync.recordDeletion(id);
-```
-
-Outbox에 기록된 작업은 별도 Scheduler가 처리합니다.
-
-```java
-@Scheduled(
-    fixedDelayString = "${app.search-sync.poll-delay-ms:2000}",
-    initialDelayString = "2000"
-)
-public void deliver() {
-    try {
-        sync.processPending();
-    } catch (Exception e) {
-        log.error("Search outbox processing failed; committed work will be retried", e);
-    }
-}
-```
-
-<br/><br/>
-
-----
-
-4) Elasticsearch 기반 고객 검색 및 초성 검색 <br/>
+1) Elasticsearch 기반 고객 검색 및 초성 검색 <br/>
 고객명, 등급, 연락처, 초대코드, 메모를 검색할 수 있도록 Elasticsearch를 사용했습니다.
 
 + name, note는 한글 검색을 고려해 analyzer를 적용했습니다.
@@ -176,45 +85,13 @@ public void deliver() {
 + 삭제된 고객은 검색 결과에 포함되지 않도록 처리했습니다.
 
 ```java
-public CustomerSearchEntity toSearchEntity(Customer customer) {
-    CustomerSearchEntity entity = new CustomerSearchEntity();
-
-    entity.setId(customer.getId());
-    entity.setName(customer.getName());
-    entity.setGrade(customer.getGrade());
-    entity.setPhone(customer.getPhone());
-    entity.setCode(customer.getCode());
-    entity.setNote(customer.getNote());
-    entity.setNameChosung(getChosung(customer.getName()));
-
-    return entity;
-}
-```
-```java
 if (c >= '가' && c <= '힣') {
     int uniVal = c - 0xAC00;
     int choIdx = uniVal / 588;
     sb.append(cho[choIdx]);
 }
 ```
-```java
-@Query("""
-{
-  "bool": {
-    "should": [
-      { "match": { "name": { "query": "?0" } } },
-      { "match": { "note": { "query": "?0" } } },
-      { "wildcard": { "grade": { "value": "*?0*" } } },
-      { "wildcard": { "phone": { "value": "*?0*" } } },
-      { "wildcard": { "code": { "value": "*?0*" } } },
-      { "wildcard": { "nameChosung": { "value": "*?0*" } } }
-    ],
-    "minimum_should_match": 1
-  }
-}
-""")
-List<CustomerSearchEntity> searchAll(String keyword);
-```
+
 
 <br/><br/>
 
@@ -235,52 +112,40 @@ String keycloakId = jwt.getSubject();
 
 Admin admin = keycloakId == null ? null
         : adminRepository.findByKeycloakId(keycloakId).orElse(null);
-```
-```java
-if (admin.getRole() != null) {
-    authorities.add(new SimpleGrantedAuthority(
-            "ROLE_" + admin.getRole().name()
-    ));
+
+if (admin == null || admin.getState() != Admin.State.ACTIVE) {
+    throw new OAuth2AuthenticationException(
+            new OAuth2Error("invalid_token"),
+            "활성 관리자 계정이 아닙니다."
+    );
 }
 ```
 <br/><br/>
 
 ----
 
-6) Outbox 기반 Keycloak 관리자 계정 동기화
+6) Outbox 기반 외부 시스템 동기화
 
-관리자 정보는 MySQL에 저장하고 실제 로그인 계정은 Keycloak에 생성하도록 구성했습니다.
+MySQL에 저장된 데이터 변경을 Elasticsearch와 Keycloak에도 반영하기 위해 Transactional Outbox 패턴을 적용했습니다.
 
-+ 관리자 등록 시 MySQL에 관리자 정보와 Outbox 작업을 함께 저장합니다.
-+ 생성 대기 상태인 PENDING_CREATE에서 Keycloak 계정 생성이 완료되면 ACTIVE로 변경합니다.
-+ 관리자 수정·삭제도 Outbox에 기록하고 별도 작업으로 반영합니다.
-+ 실패한 작업은 재시도하며, 계정 상태에 따라 서비스 접근 여부를 제어합니다.
-
-```java
-admin.setState(Admin.State.PENDING_CREATE);
-
-Admin savedAdmin = adminRepository.save(admin);
-accountSync.enqueue(savedAdmin);
-```
-
-Keycloak 연동은 별도 작업에서 수행합니다.
++ 고객 또는 관리자 데이터 변경 시 Outbox 작업을 같은 MySQL 트랜잭션에 저장합니다.
++ Spring Scheduler가 대기 중인 작업을 조회해 외부 시스템에 반영합니다.
++ 작업이 실패하면 일정 시간 후 재시도하고 재시도 한도를 초과하면 FAILED 상태로 관리합니다.
++ 메시지 브로커나 CDC 없이 MySQL과 Spring Boot만으로 동기화 구조를 구현했습니다.
 
 ```java
-case PENDING_CREATE -> {
-    admin.setKeycloakId(gateway.ensureCreated(admin));
-    gateway.updateProfile(admin);
-    admin.setState(Admin.State.ACTIVE);
-}
+고객 / 관리자 데이터 변경
+          ↓
+MySQL 데이터 + Outbox 저장
+          ↓
+     Spring Scheduler
+          ↓
+ Elasticsearch / Keycloak
+          ↓
+    성공 또는 재시도
 ```
 
-관리자 삭제 시에는 먼저 DELETING 상태로 변경하고 Keycloak 계정 삭제를 요청합니다.
-
-```java
-admin.setState(Admin.State.DELETING);
-accountSync.enqueue(admin);
-```
-Keycloak 계정 삭제가 완료되기 전에도 DB의 관리자 상태를 통해 서비스 접근을 차단할 수 있도록 했습니다.
-
+외부 시스템 반영을 별도 작업으로 처리해 장애가 발생하더라도 MySQL에 기록된 변경 작업을 추적할 수 있도록 했습니다
 
 <br/><br/><br/>
 
@@ -319,33 +184,6 @@ public class AdminPermission {
     // ...
 }
 ```
-```java
-@OneToMany(
-    mappedBy = "admin",
-    cascade = CascadeType.ALL,
-    orphanRemoval = true
-)
-private Set<AdminPermission> adminPermissions = new LinkedHashSet<>();
-```
-```java
-admin.getAdminPermissions().removeIf(adminPermission -> {
-    Permission permission = adminPermission.getPermission();
-
-    return permission == null
-            || permission.getCode() == null
-            || !requestedCodes.contains(permission.getCode());
-});
-```
-```java
-if (existingCodes.contains(permission.getCode())) {
-    continue;
-}
-
-AdminPermission adminPermission = new AdminPermission();
-adminPermission.setAdmin(admin);
-adminPermission.setPermission(permission);
-admin.getAdminPermissions().add(adminPermission);
-```
 
 <br/><br/>
 
@@ -375,10 +213,6 @@ admin.getAdminPermissions().add(adminPermission);
 ```java
 Customer saved = customerRepository.save(customer);
 searchSync.record(saved);
-```
-```java
-index.write(document, Math.multiplyExact(event.getId(), 2L));
-event.complete(clock.instant());
 ```
 
 <br/><br/>
@@ -410,11 +244,6 @@ event.complete(clock.instant());
 admin.setState(Admin.State.PENDING_CREATE);
 Admin savedAdmin = adminRepository.save(admin);
 accountSync.enqueue(savedAdmin);
-```
-```java
-user.setAttributes(
-    Map.of(OWNER_ATTRIBUTE, List.of(admin.getAccountRef()))
-);
 ```
 
 
